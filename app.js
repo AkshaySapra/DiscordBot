@@ -5,7 +5,8 @@ import {
   Partials,
   Events,
 } from 'discord.js';
-import { getSarcasticReply } from './sarcasm.js';
+import { generateSarcasticReply, geminiEnabled } from './gemini.js';
+import { isRoastWorthy } from './roastWorthy.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -13,12 +14,14 @@ if (!token) {
   process.exit(1);
 }
 
-// Chance to auto-reply when not @mentioned (0.0–1.0)
-const AUTO_REPLY_CHANCE = Number(process.env.AUTO_REPLY_CHANCE ?? 0.25);
-// Minimum seconds between auto-replies in the same channel
-const COOLDOWN_SECONDS = Number(process.env.COOLDOWN_SECONDS ?? 20);
+if (!process.env.GEMINI_API_KEY) {
+  console.warn('GEMINI_API_KEY missing — using canned sarcasm fallbacks only.');
+}
 
-const lastReplyAt = new Map();
+// Cooldown for unsolicited (non-mention) Gemini roasts in a channel
+const COOLDOWN_SECONDS = Number(process.env.COOLDOWN_SECONDS ?? 45);
+
+const lastUnsolicitedReplyAt = new Map();
 
 const client = new Client({
   intents: [
@@ -32,7 +35,11 @@ const client = new Client({
 
 client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
-  console.log('Sarcastic auto-replies are on. No ngrok needed for this mode.');
+  console.log(
+    geminiEnabled()
+      ? 'Gemini sarcasm on (mention-first; roast-worthy messages may get unsolicited replies).'
+      : 'Canned sarcasm only (add GEMINI_API_KEY for Gemini).'
+  );
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -43,17 +50,32 @@ client.on(Events.MessageCreate, async (message) => {
     const mentioned =
       message.mentions.has(client.user) || message.channel.isDMBased();
 
+    // Default: stay quiet unless @mentioned / DM, OR the message looks roast-worthy
     if (!mentioned) {
-      if (Math.random() > AUTO_REPLY_CHANCE) return;
+      if (!isRoastWorthy(message.content)) return;
 
       const key = message.channelId;
       const now = Date.now();
-      const last = lastReplyAt.get(key) ?? 0;
+      const last = lastUnsolicitedReplyAt.get(key) ?? 0;
       if (now - last < COOLDOWN_SECONDS * 1000) return;
-      lastReplyAt.set(key, now);
+      lastUnsolicitedReplyAt.set(key, now);
     }
 
-    const reply = getSarcasticReply({ mentioned });
+    // Strip the bot mention from what we send to Gemini
+    let textForModel = message.content;
+    if (client.user) {
+      textForModel = textForModel
+        .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
+        .trim();
+    }
+
+    await message.channel.sendTyping();
+
+    const reply = await generateSarcasticReply(textForModel, {
+      mentioned,
+      displayName: message.member?.displayName || message.author.username,
+    });
+
     await message.reply({
       content: reply,
       allowedMentions: { repliedUser: false },
