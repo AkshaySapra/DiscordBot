@@ -9,6 +9,8 @@ import cron from 'node-cron';
 import { generateSarcasticReply, geminiEnabled } from './gemini.js';
 import { isRoastWorthy } from './roastWorthy.js';
 import { runDailyDigest, resolveGuild } from './dailyJob.js';
+import { detectTone } from './tone.js';
+import { handleOwnerCommand } from './ownerRules.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -77,6 +79,11 @@ client.once(Events.ClientReady, (c) => {
       ? 'Gemini sarcasm on (mention-first; roast-worthy messages may get unsolicited replies).'
       : 'Canned sarcasm only (add GEMINI_API_KEY for Gemini).'
   );
+  if (process.env.OWNER_USER_ID) {
+    console.log('Owner rules enabled for configured OWNER_USER_ID.');
+  } else {
+    console.log('OWNER_USER_ID not set — standing owner instructions disabled.');
+  }
   scheduleDailyJob();
 });
 
@@ -125,6 +132,18 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
+    // Owner standing instructions: @bot remember: always be nice to Bill
+    if (mentioned) {
+      const ownerReply = handleOwnerCommand(message.author.id, message.content);
+      if (ownerReply) {
+        await message.reply({
+          content: ownerReply,
+          allowedMentions: { repliedUser: false },
+        });
+        return;
+      }
+    }
+
     if (!mentioned) {
       if (!isRoastWorthy(message.content)) return;
 
@@ -141,6 +160,9 @@ client.on(Events.MessageCreate, async (message) => {
         .replace(new RegExp(`<@!?${client.user.id}>`, 'g'), '')
         .trim();
     }
+
+    // Mentions can ask for tone; unsolicited auto-roasts stay sarcastic
+    const tone = mentioned ? detectTone(textForModel) : 'sarcastic';
 
     let referencedText = null;
     let referencedAuthor = null;
@@ -162,6 +184,7 @@ client.on(Events.MessageCreate, async (message) => {
       displayName: message.member?.displayName || message.author.username,
       referencedText,
       referencedAuthor,
+      tone,
     });
 
     await message.reply({
