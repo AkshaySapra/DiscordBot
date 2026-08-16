@@ -2,7 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { getSarcasticReply } from './sarcasm.js';
 
 const apiKey = process.env.GEMINI_API_KEY;
-const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const modelName = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
 const SYSTEM_PROMPT = `You are a sarcastic Discord bot. Reply in 1-2 short sentences.
 Be witty and dry, not cruel. No slurs, hate, or sexual content involving minors.
