@@ -1,8 +1,8 @@
 {
-  "name": "discord-getting-started",
+  "name": "discord-sarcastic-bot",
   "private": true,
-  "version": "1.0.0",
-  "description": "Discord example app",
+  "version": "2.0.0",
+  "description": "A sarcastic Discord bot that auto-replies in chat",
   "main": "app.js",
   "type": "module",
   "engines": {
@@ -10,15 +10,12 @@
   },
   "scripts": {
     "start": "node app.js",
-    "register": "node commands.js",
     "dev": "nodemon app.js"
   },
-  "author": "Shay DeWael",
   "license": "MIT",
   "dependencies": {
-    "discord-interactions": "^4.0.0",
-    "dotenv": "^16.0.3",
-    "express": "^4.18.2"
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
