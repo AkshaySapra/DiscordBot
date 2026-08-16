@@ -69,11 +69,27 @@ client.on(Events.MessageCreate, async (message) => {
         .trim();
     }
 
+    // If the user Discord-replied to another message, include that message as context
+    let referencedText = null;
+    let referencedAuthor = null;
+    if (message.reference?.messageId) {
+      try {
+        const ref = await message.fetchReference();
+        referencedText = ref.content || null;
+        referencedAuthor =
+          ref.member?.displayName || ref.author?.username || null;
+      } catch (err) {
+        console.warn('Could not fetch replied-to message:', err.message || err);
+      }
+    }
+
     await message.channel.sendTyping();
 
     const reply = await generateSarcasticReply(textForModel, {
       mentioned,
       displayName: message.member?.displayName || message.author.username,
+      referencedText,
+      referencedAuthor,
     });
 
     await message.reply({
