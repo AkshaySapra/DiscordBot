@@ -4,9 +4,12 @@ import {
   GatewayIntentBits,
   Partials,
   Events,
+  PermissionFlagsBits,
 } from 'discord.js';
+import cron from 'node-cron';
 import { generateSarcasticReply, geminiEnabled } from './gemini.js';
 import { isRoastWorthy } from './roastWorthy.js';
+import { runDailyDigest } from './dailyJob.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -20,8 +23,11 @@ if (!process.env.GEMINI_API_KEY) {
 
 // Cooldown for unsolicited (non-mention) Gemini roasts in a channel
 const COOLDOWN_SECONDS = Number(process.env.COOLDOWN_SECONDS ?? 45);
+const DAILY_CRON = process.env.DAILY_CRON || '0 12 * * *'; // noon daily
+const DAILY_TZ = process.env.DAILY_TZ || 'America/New_York';
 
 const lastUnsolicitedReplyAt = new Map();
+let lastDailyKey = null;
 
 const client = new Client({
   intents: [
@@ -33,6 +39,35 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
+function scheduleDailyJob() {
+  if (!process.env.DAILY_CHANNEL_ID) {
+    console.log('DAILY_CHANNEL_ID not set — daily roast/QOTD disabled.');
+    return;
+  }
+
+  if (!cron.validate(DAILY_CRON)) {
+    console.error(`Invalid DAILY_CRON "${DAILY_CRON}" — daily job not scheduled.`);
+    return;
+  }
+
+  cron.schedule(
+    DAILY_CRON,
+    async () => {
+      const key = new Date().toLocaleDateString('en-CA', { timeZone: DAILY_TZ });
+      if (lastDailyKey === key) return;
+      lastDailyKey = key;
+      try {
+        await runDailyDigest(client);
+      } catch (err) {
+        console.error('Scheduled daily digest failed:', err.message || err);
+      }
+    },
+    { timezone: DAILY_TZ }
+  );
+
+  console.log(`Daily roast/QOTD scheduled: "${DAILY_CRON}" (${DAILY_TZ})`);
+}
+
 client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
   console.log(
@@ -40,6 +75,7 @@ client.once(Events.ClientReady, (c) => {
       ? 'Gemini sarcasm on (mention-first; roast-worthy messages may get unsolicited replies).'
       : 'Canned sarcasm only (add GEMINI_API_KEY for Gemini).'
   );
+  scheduleDailyJob();
 });
 
 client.on(Events.MessageCreate, async (message) => {
@@ -49,6 +85,35 @@ client.on(Events.MessageCreate, async (message) => {
 
     const mentioned =
       message.mentions.has(client.user) || message.channel.isDMBased();
+
+    // Manual test: @bot rundaily (Manage Server / Admin only)
+    if (mentioned && /\brundaily\b/i.test(message.content)) {
+      const member = message.member;
+      const allowed =
+        message.channel.isDMBased() ||
+        member?.permissions?.has(PermissionFlagsBits.ManageGuild) ||
+        member?.permissions?.has(PermissionFlagsBits.Administrator);
+      if (!allowed) {
+        await message.reply({
+          content: 'Nice try. Only server managers can run the daily job.',
+          allowedMentions: { repliedUser: false },
+        });
+        return;
+      }
+      await message.reply({
+        content: 'On it — scanning recent chat…',
+        allowedMentions: { repliedUser: false },
+      });
+      try {
+        await runDailyDigest(client, { force: true });
+      } catch (err) {
+        await message.reply({
+          content: `Daily job failed: ${err.message}`,
+          allowedMentions: { repliedUser: false },
+        });
+      }
+      return;
+    }
 
     // Default: stay quiet unless @mentioned / DM, OR the message looks roast-worthy
     if (!mentioned) {

@@ -72,3 +72,72 @@ export async function generateSarcasticReply(
     return getSarcasticReply({ mentioned });
   }
 }
+
+/**
+ * One sarcastic digest from a batch of recent channel messages.
+ */
+export async function generateDailyRoast(messageLines) {
+  if (!ai) {
+    return "I'd roast today's chat, but my brain is offline. Check GEMINI_API_KEY.";
+  }
+
+  const transcript = messageLines.slice(0, 80).join('\n').slice(0, 8000);
+  const prompt = `You are a sarcastic Discord bot writing a once-a-day roast of recent server chat.
+Write 1 short paragraph (3-6 sentences) calling out funny patterns, hot takes, or chaos.
+Be witty, not cruel. No slurs or hate. Don't invent messages that aren't listed.
+Don't name-drop in a bullying way — keep it light.
+Reply with only the roast paragraph.
+
+Recent messages:
+${transcript || '(no messages found)'}`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+    });
+    const text = (response.text || '').trim();
+    return text.slice(0, 1800) || "Today's chat was so boring I got nothing. Impressive.";
+  } catch (err) {
+    console.error('Gemini daily roast error:', err.message || err);
+    return "Daily roast failed. The chat wins today.";
+  }
+}
+
+/**
+ * Question of the day + poll options as JSON.
+ */
+export async function generateQuestionOfTheDay() {
+  const fallback = {
+    question: 'What energy is the server on today?',
+    options: ['Chaotic', 'Sleepy', 'Petty', 'Surprisingly normal'],
+  };
+
+  if (!ai) return fallback;
+
+  const prompt = `Create one fun Discord "question of the day" for a friend group server.
+Return ONLY valid JSON with this shape:
+{"question":"string under 120 chars","options":["opt1","opt2","opt3","opt4"]}
+Options must be short (under 50 chars each), 3 to 4 options.
+Keep it playful and SFW. No politics, no NSFW.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: modelName,
+      contents: prompt,
+    });
+    const raw = (response.text || '').trim();
+    const jsonText = raw.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, '');
+    const parsed = JSON.parse(jsonText);
+    if (!parsed.question || !Array.isArray(parsed.options) || parsed.options.length < 2) {
+      return fallback;
+    }
+    return {
+      question: String(parsed.question).slice(0, 300),
+      options: parsed.options.map((o) => String(o).slice(0, 55)).slice(0, 4),
+    };
+  } catch (err) {
+    console.error('Gemini QOTD error:', err.message || err);
+    return fallback;
+  }
+}
