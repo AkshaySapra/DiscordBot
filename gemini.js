@@ -9,6 +9,8 @@ const modelName = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 const BASE_RULES = `You are a Discord bot. Reply in 1-2 short sentences.
 If a referenced/older message is provided, respond to THAT content (as directed by the user).
 Owner standing instructions (if any) override default tone when they conflict.
+If you cannot make a funny/interesting reply (too boring, nothing to riff on, or you'd just repeat yourself), reply with exactly: SKIP
+Do not reuse the same joke structure or opening as the recent bot replies listed below.
 Reply with only the response text — no quotes or prefixes.`;
 
 let ai = null;
@@ -27,19 +29,25 @@ function cleanText(text) {
     .slice(0, 500);
 }
 
-function buildSystemPrompt(tone = 'sarcastic') {
+function buildSystemPrompt(tone = 'sarcastic', recentReplies = []) {
   const rules = getOwnerRules();
   const ownerBlock = rules.length
     ? `Owner standing instructions (always follow):\n${rules.map((r) => `- ${r}`).join('\n')}`
     : 'Owner standing instructions: none.';
 
-  return `${BASE_RULES}\n${toneInstruction(tone)}\n${ownerBlock}`;
+  const recentBlock = recentReplies.length
+    ? `Recent bot replies to avoid repeating:\n${recentReplies.map((r) => `- ${r}`).join('\n')}`
+    : 'Recent bot replies to avoid repeating: none yet.';
+
+  return `${BASE_RULES}\n${toneInstruction(tone)}\n${ownerBlock}\n${recentBlock}`;
+}
+
+function isSkip(text) {
+  return /^skip\.?$/i.test(String(text || '').trim());
 }
 
 /**
- * Generate a reply for a Discord message.
- * Sends only: current message text, optional replied-to message, display name, tone, owner rules.
- * Does not use personal Gemini memory.
+ * Generate a reply. Returns null when the model (or filters) say SKIP.
  */
 export async function generateSarcasticReply(
   messageText,
@@ -49,11 +57,14 @@ export async function generateSarcasticReply(
     referencedText = null,
     referencedAuthor = null,
     tone = 'sarcastic',
+    recentReplies = [],
+    allowSkip = true,
   } = {}
 ) {
   const cleaned = cleanText(messageText);
 
   if (!ai) {
+    if (allowSkip && !mentioned) return null;
     return getSarcasticReply({ mentioned });
   }
 
@@ -71,16 +82,86 @@ export async function generateSarcasticReply(
   try {
     const response = await ai.models.generateContent({
       model: modelName,
-      contents: `${buildSystemPrompt(tone)}\n\n${context}`,
+      contents: `${buildSystemPrompt(tone, recentReplies)}\n\n${context}`,
     });
 
     const text = (response.text || '').trim();
-    if (!text) return getSarcasticReply({ mentioned });
+    if (!text || isSkip(text)) {
+      if (allowSkip) return null;
+      return getSarcasticReply({ mentioned });
+    }
     return text.slice(0, 400);
   } catch (err) {
     console.error('Gemini error, using fallback line:', err.message || err);
+    if (allowSkip && !mentioned) return null;
     return getSarcasticReply({ mentioned });
   }
+}
+
+export async function generateGameContent(game, payload = {}) {
+  if (!ai) {
+    if (game === 'wyr') {
+      return {
+        question: 'Would you rather?',
+        optionA: 'Infinite pizza',
+        optionB: 'Infinite good Wi‑Fi',
+        setup: 'Classic dilemmas only.',
+      };
+    }
+    if (game === 'duel') {
+      return `${payload.fighterA} wins by default — my roast engine is offline.`;
+    }
+    return 'Court is closed (no GEMINI_API_KEY).';
+  }
+
+  try {
+    if (game === 'duel') {
+      const prompt = `You are a sarcastic fight announcer for a Discord roast duel.
+Fighter A: ${payload.fighterA}
+Fighter B: ${payload.fighterB}
+Write 3 short lines: one jab at A, one jab at B, then declare a winner with a punchy reason.
+Keep it playful, not cruel. Reply with only those lines.`;
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+      });
+      return (response.text || '').trim().slice(0, 500) || 'Draw. Both mid.';
+    }
+
+    if (game === 'wyr') {
+      const prompt = `Create a fun Discord "Would You Rather" for friends.
+Return ONLY JSON:
+{"question":"Would you rather...?","optionA":"short","optionB":"short","setup":"optional one-liner"}
+Options under 50 chars. Playful, SFW.`;
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+      });
+      const raw = (response.text || '').trim();
+      const jsonText = raw
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/\s*```$/, '');
+      return JSON.parse(jsonText);
+    }
+
+    if (game === 'court') {
+      const prompt = `You are a sarcastic judge in "Hot-Take Court".
+Defendant: ${payload.author}
+Hot take: "${cleanText(payload.take)}"
+Give a short ruling (2-4 sentences): verdict (sustained / overruled / mistrial), one joke, one sentence of "reasoning".
+Reply with only the ruling.`;
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+      });
+      return (response.text || '').trim().slice(0, 700) || 'Mistrial. Take too slippery.';
+    }
+  } catch (err) {
+    console.error('Gemini game error:', err.message || err);
+  }
+
+  return 'Game engine hiccuped. Try again.';
 }
 
 /**

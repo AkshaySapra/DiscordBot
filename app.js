@@ -11,6 +11,15 @@ import { isRoastWorthy } from './roastWorthy.js';
 import { runDailyDigest, resolveGuild } from './dailyJob.js';
 import { detectTone } from './tone.js';
 import { handleOwnerCommand } from './ownerRules.js';
+import { handleGameCommand } from './games.js';
+import {
+  getRecentReplies,
+  rememberReply,
+  isUserOnCooldown,
+  markUserReplied,
+  isTooSimilarToRecent,
+  isBoringInput,
+} from './replyMemory.js';
 
 const token = process.env.DISCORD_TOKEN;
 if (!token) {
@@ -23,7 +32,7 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const COOLDOWN_SECONDS = Number(process.env.COOLDOWN_SECONDS ?? 45);
-// Quotes in .env are fine: DAILY_CRON="0 12 * * *"
+const USER_COOLDOWN_SECONDS = Number(process.env.USER_COOLDOWN_SECONDS ?? 120);
 const DAILY_CRON = (process.env.DAILY_CRON || '0 12 * * *').trim();
 const DAILY_TZ = process.env.DAILY_TZ || 'America/New_York';
 const RUNDAILY_COOLDOWN_SECONDS = Number(
@@ -76,7 +85,7 @@ client.once(Events.ClientReady, (c) => {
   console.log(`Logged in as ${c.user.tag}`);
   console.log(
     geminiEnabled()
-      ? 'Gemini sarcasm on (mention-first; roast-worthy messages may get unsolicited replies).'
+      ? 'Gemini on — SKIP boring, anti-repeat, per-user cooldown, mini-games.'
       : 'Canned sarcasm only (add GEMINI_API_KEY for Gemini).'
   );
   if (process.env.OWNER_USER_ID) {
@@ -95,7 +104,6 @@ client.on(Events.MessageCreate, async (message) => {
     const mentioned =
       message.mentions.has(client.user) || message.channel.isDMBased();
 
-    // Anyone can trigger: @bot rundaily
     if (mentioned && /\brundaily\b/i.test(message.content)) {
       const now = Date.now();
       const waitMs = RUNDAILY_COOLDOWN_SECONDS * 1000 - (now - lastManualDailyAt);
@@ -119,7 +127,8 @@ client.on(Events.MessageCreate, async (message) => {
         const guild = await resolveGuild(client, message.guild);
         const result = await runDailyDigest(client, { guild, force: true });
         await message.reply({
-          content: `Done. Roasted ${result.roasted} message(s)` +
+          content:
+            `Done. Roasted ${result.roasted} message(s)` +
             (result.qotdPosted ? ' and dropped a QOTD poll.' : '.'),
           allowedMentions: { repliedUser: false },
         });
@@ -132,7 +141,6 @@ client.on(Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Owner standing instructions: @bot remember: always be nice to Bill
     if (mentioned) {
       const ownerReply = handleOwnerCommand(message.author.id, message.content);
       if (ownerReply) {
@@ -142,10 +150,24 @@ client.on(Events.MessageCreate, async (message) => {
         });
         return;
       }
+
+      const game = await handleGameCommand(message, client.user.id);
+      if (game) {
+        await message.channel.sendTyping();
+        await message.reply({
+          content: game.content,
+          poll: game.poll,
+          allowedMentions: { repliedUser: false, users: [] },
+        });
+        if (game.content) rememberReply(game.content);
+        return;
+      }
     }
 
     if (!mentioned) {
+      if (isBoringInput(message.content)) return;
       if (!isRoastWorthy(message.content)) return;
+      if (isUserOnCooldown(message.author.id, USER_COOLDOWN_SECONDS)) return;
 
       const key = message.channelId;
       const now = Date.now();
@@ -161,8 +183,8 @@ client.on(Events.MessageCreate, async (message) => {
         .trim();
     }
 
-    // Mentions can ask for tone; unsolicited auto-roasts stay sarcastic
     const tone = mentioned ? detectTone(textForModel) : 'sarcastic';
+    const recent = getRecentReplies(3);
 
     let referencedText = null;
     let referencedAuthor = null;
@@ -179,18 +201,59 @@ client.on(Events.MessageCreate, async (message) => {
 
     await message.channel.sendTyping();
 
-    const reply = await generateSarcasticReply(textForModel, {
+    let reply = await generateSarcasticReply(textForModel, {
       mentioned,
       displayName: message.member?.displayName || message.author.username,
       referencedText,
       referencedAuthor,
       tone,
+      recentReplies: recent,
+      allowSkip: !mentioned,
     });
+
+    // Mentions always get something; unsolicited can stay quiet
+    if (!reply) {
+      if (!mentioned) return;
+      reply = await generateSarcasticReply(textForModel, {
+        mentioned: true,
+        displayName: message.member?.displayName || message.author.username,
+        referencedText,
+        referencedAuthor,
+        tone,
+        recentReplies: recent,
+        allowSkip: false,
+      });
+    }
+
+    if (reply && isTooSimilarToRecent(reply, recent)) {
+      if (!mentioned) return;
+      reply = await generateSarcasticReply(
+        `${textForModel}\n(Please make a clearly different joke than before.)`,
+        {
+          mentioned: true,
+          displayName: message.member?.displayName || message.author.username,
+          referencedText,
+          referencedAuthor,
+          tone,
+          recentReplies: recent,
+          allowSkip: false,
+        }
+      );
+      if (reply && isTooSimilarToRecent(reply, recent)) {
+        // last resort: still send for mentions
+      } else if (!reply) {
+        return;
+      }
+    }
+
+    if (!reply) return;
 
     await message.reply({
       content: reply,
       allowedMentions: { repliedUser: false },
     });
+    rememberReply(reply);
+    if (!mentioned) markUserReplied(message.author.id);
   } catch (err) {
     console.error('Failed to reply:', err);
   }
